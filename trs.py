@@ -14,7 +14,9 @@ from bs4 import BeautifulSoup
 
 
 def get_translation_from_bing(word: str):
-    response = requests.get("https://cn.bing.com/dict/what?mkt=zh-CN&setlang=ZH").text
+    response = requests.get(
+        f"https://cn.bing.com/dict/{word}?mkt=zh-CN&setlang=ZH"
+    ).text
     soup = BeautifulSoup(response, "html.parser")
     spans = soup.find_all("span", class_=["pos", "def b_regtxt"])
     pos_list = []
