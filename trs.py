@@ -1,3 +1,5 @@
+#!/home/eric/miniconda3/envs/learn/bin/python3
+# -*- coding: UTF-8 -*-
 import os
 import sys
 from typing import Dict
