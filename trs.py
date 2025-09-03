@@ -188,7 +188,6 @@ def get_last_translation():
 def main():
     args = args_init()
     arg_num = len(args.text)
-    get_last_translation()
     if args.help:
         print_help()
         exit(0)
