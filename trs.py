@@ -16,6 +16,12 @@ from rich.console import Console
 from bs4 import BeautifulSoup
 
 
+def is_a_single_word(content: str):
+    if " " not in content.strip():
+        return True
+    return False
+
+
 def save_translation(translation: str):
     temp_dir = tempfile.gettempdir()
     file_path = os.path.join(temp_dir, "last_translation.txt")
@@ -83,6 +89,7 @@ def output_translation_from_bing(word: str, pos_def_list: Dict[str, str]):
 
 
 def process_word(word: str):
+    word = word.strip()
     pos_def_list = get_translation_from_bing(word)
     raw_trans = output_translation_from_bing(word, pos_def_list)
     save_translation(raw_trans)
@@ -168,6 +175,9 @@ def args_init():
         action="store_true",
         help="若当前有待翻译文本输入，则将当前文本翻译的结果保存到本地，否则将上一次翻译的结果保存到本地",
     )
+    parser.add_argument(
+        "-x", "--translate_clip", action="store_true", help="直接翻译剪切板"
+    )
     parser.add_argument("-h", "--help", action="store_true", help="显示帮助信息")
     parser.add_argument("text", nargs="*", help="待翻译文本")
     return parser.parse_args()
@@ -185,6 +195,15 @@ def get_last_translation():
         exit(0)
 
 
+def handle_translate_clip():
+    content = pyperclip.paste()
+    if is_a_single_word(content):
+        translation = process_word(content)
+    else:
+        translation = process_sentence(content)
+    return translation
+
+
 def main():
     args = args_init()
     arg_num = len(args.text)
@@ -192,15 +211,23 @@ def main():
         print_help()
         exit(0)
     if arg_num == 0:
-        if args.copy:
+        if args.translate_clip:
+            handle_translate_clip()
+            if not args.copy and not args.save:
+                exit(0)
+        if args.copy and not args.save:
             handle_copy()
             exit(0)
-        if args.save:
+        if args.save and not args.copy:
+            handle_save()
+            exit(0)
+        if args.copy and args.save:
+            handle_copy()
             handle_save()
             exit(0)
         print("请输入要翻译的内容")
         sys.exit(0)
-    if arg_num == 1 and " " not in args.text[0]:
+    if arg_num == 1 and is_a_single_word(args.text[0]):
         translation = process_word(args.text[0])
     else:
         translation = process_sentence(" ".join(args.text))
