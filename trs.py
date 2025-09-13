@@ -1,6 +1,14 @@
 #!/home/eric/miniconda3/envs/learn/bin/python3
 # -*- coding: UTF-8 -*-
+import edge_tts
+import warnings
+
 import os
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
+import asyncio
+import re
 import sys
 import pyperclip
 import tempfile
@@ -14,6 +22,7 @@ from rich import box
 from rich.table import Table
 from rich.console import Console
 from bs4 import BeautifulSoup
+import pygame
 
 
 def is_a_single_word(content: str):
@@ -56,31 +65,86 @@ def save_to_the_local(words: str):
         exit(0)
 
 
+def parse_bing_dict_entry(text):
+    # 提取发音部分
+    pronunciation_pattern = r"美\[([^]]+)]，英\[([^]]+)]"
+    pronunciation_match = re.search(pronunciation_pattern, text)
+
+    result = {}
+
+    if pronunciation_match:
+        result["us_pronunciation"] = pronunciation_match.group(1)
+        result["uk_pronunciation"] = pronunciation_match.group(2)
+        # 移除发音部分，以便后续处理
+        text = text[pronunciation_match.end() :].strip()
+
+    # 预定义的词性标签
+    pos_tags = ["pron.", "adj.", "adv.", "conj.", "网络释义"]
+
+    # 按分号分割字符串，但保留分割符？不，我们按分号分割，然后去掉每个片段前后的空格
+    segments = [seg.strip() for seg in text.split("；") if seg.strip()]
+
+    current_pos = None
+    for seg in segments:
+        # 检查当前片段是否以某个词性标签开头
+        found = False
+        for tag in pos_tags:
+            if seg.startswith(tag):
+                # 如果当前已经有一个词性在记录中，则先将之前的词性释义合并成字符串存入结果
+                if current_pos is not None:
+                    # 将当前词性的所有释义项用分号连接
+                    result[current_pos] = "；".join(result[current_pos])
+                current_pos = tag
+                # 去掉标签，获取释义部分
+                definition = seg[len(tag) :].strip()
+                # 如果释义以冒号开头，去掉冒号
+                if definition.startswith("："):
+                    definition = definition[1:].strip()
+                result[current_pos] = [definition]
+                found = True
+                break
+        if not found and current_pos is not None:
+            # 当前片段不是词性标签，则添加到当前词性的释义列表中
+            result[current_pos].append(seg)
+
+    # 处理最后一个词性
+    if current_pos is not None:
+        result[current_pos] = "；".join(result[current_pos])
+
+    return result
+
+
 def get_translation_from_bing(word: str):
     response = requests.get(
         f"https://cn.bing.com/dict/{word}?mkt=zh-CN&setlang=ZH"
     ).text
     soup = BeautifulSoup(response, "html.parser")
-    spans = soup.find_all("span", class_=["pos", "def b_regtxt"])
-    pos_list = []
-    def_list = []
-    cnt = 0
-    for span in spans:
-        if cnt == 0:
-            pos_list.append(span.get_text())
-            cnt = 1
-        else:
-            def_list.append(span.get_text())
-            cnt = 0
-    return dict(zip(pos_list, def_list))
+    metas = soup.find_all("meta")
+    for meta in metas:
+        if "name" in meta.attrs:
+            if meta.attrs["name"] == "description":
+                data = meta.attrs["content"]
+                result = parse_bing_dict_entry(data)
+                return result
+    return dict()
 
 
 def output_translation_from_bing(word: str, pos_def_list: Dict[str, str]):
     console = Console()
-    table = Table(title=word, box=box.SQUARE_DOUBLE_HEAD)
+    title = (
+        word
+        + " 美: "
+        + pos_def_list["us_pronunciation"]
+        + " 英: "
+        + pos_def_list["uk_pronunciation"]
+    )
+    table = Table(title=title, box=box.SQUARE_DOUBLE_HEAD)
     table.add_column("词性", justify="center", style="red")
     table.add_column("词义", justify="center", style="green")
     raw_trans = "词性,词义\n"
+
+    del pos_def_list["uk_pronunciation"]
+    del pos_def_list["us_pronunciation"]
     for pos, define in pos_def_list.items():
         table.add_row(pos, define)
         raw_trans += pos + "," + define + "\n"
@@ -136,16 +200,15 @@ def print_help():
 翻译工具 (trs)
 
 使用方法:
-  trs [-h] [-c] [-s] [text ...]
+  trs [-h] [-c] [-s] [-v] [text ...]
 
 参数:
   text         要翻译的文本，可以是一个单词或一个句子，带引号或不带引号
 
 选项:
   -h, --help   显示此帮助信息
-  -c           启用某种功能
-  -s           启用另一种功能
-
+  -c           拷贝
+  -s           保存
 示例:
   trs what is your position
   trs "what is your position"
@@ -175,6 +238,7 @@ def args_init():
         action="store_true",
         help="若当前有待翻译文本输入，则将当前文本翻译的结果保存到本地，否则将上一次翻译的结果保存到本地",
     )
+    parser.add_argument("-v", "--voice", action="store_true", help="阅读当前文本")
     parser.add_argument(
         "-x", "--translate_clip", action="store_true", help="直接翻译剪切板"
     )
@@ -204,7 +268,48 @@ def handle_translate_clip():
     return translation
 
 
-def main():
+async def synthesize_and_play(text, voice="en-US-GuyNeural"):
+    """
+    使用Edge-TTS将文本合成为语音并立即播放，使用临时文件自动清理。
+
+    Args:
+        text (str): 要合成的英文文本。
+        voice (str): 选择的语音名称。
+    """
+    # 创建一个临时文件，'delete=False'意味着我们先不让系统自动删，等播放完再手动删。
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_file:
+        temp_path = tmp_file.name
+
+    try:
+        # 1. 合成语音并写入临时文件
+        communicate = edge_tts.Communicate(text, voice)
+        await communicate.save(temp_path)
+
+        # 2. 初始化Pygame mixer并播放
+        pygame.mixer.init()
+        pygame.mixer.music.load(temp_path)
+        pygame.mixer.music.play()
+
+        # 3. 等待播放完毕
+        while pygame.mixer.music.get_busy():
+            await asyncio.sleep(0.1)
+
+    except Exception as e:
+        print(f"发生错误: {e}")
+    finally:
+        # 4. 无论成功与否，确保删除临时文件
+        pygame.mixer.quit()  # 确保退出mixer，释放文件占用
+        try:
+            os.unlink(temp_path)
+        except OSError as e:
+            print(f"删除文件时出错: {e}")
+
+
+def handle_voice():
+    synthesize_and_play()
+
+
+async def main():
     args = args_init()
     arg_num = len(args.text)
     if args.help:
@@ -227,15 +332,21 @@ def main():
             exit(0)
         print("请输入要翻译的内容")
         sys.exit(0)
+
+    raw_content = ""
     if arg_num == 1 and is_a_single_word(args.text[0]):
+        raw_content = args.text[0]
         translation = process_word(args.text[0])
     else:
+        raw_content = " ".join(args.text)
         translation = process_sentence(" ".join(args.text))
     if args.copy:
         handle_copy()
     if args.save:
         handle_save()
+    if args.voice and not raw_content == "":
+        await synthesize_and_play(raw_content)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
